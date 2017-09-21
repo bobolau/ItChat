@@ -3,6 +3,10 @@ import threading
 import json, xml.dom.minidom
 import copy, pickle, random
 import traceback, logging
+try:
+    from httplib import BadStatusLine
+except ImportError:
+    from http.client import BadStatusLine
 
 import requests
 from pyqrcode import QRCode
@@ -59,7 +63,8 @@ def login(self, enableCmdQR=False, picDir=None, qrCallback=None,
                 break
         if isLoggedIn:
             break
-        logger.info('Log in time out, reloading QR code.')
+        elif self.isLogging:
+            logger.info('Log in time out, reloading QR code.')
     else:
         return # log in process is stopped by user
     logger.info('Loading the contact, this may take a little while.')
@@ -129,8 +134,10 @@ def check_login(self, uuid=None):
     regx = r'window.code=(\d+)'
     data = re.search(regx, r.text)
     if data and data.group(1) == '200':
-        process_login_info(self, r.text)
-        return '200'
+        if process_login_info(self, r.text):
+            return '200'
+        else:
+            return '400'
     elif data:
         return data.group(1)
     else:
@@ -171,6 +178,11 @@ def process_login_info(core, loginContent):
             core.loginInfo['wxuin'] = core.loginInfo['BaseRequest']['Uin'] = node.childNodes[0].data
         elif node.nodeName == 'pass_ticket':
             core.loginInfo['pass_ticket'] = core.loginInfo['BaseRequest']['DeviceID'] = node.childNodes[0].data
+    if not all([key in core.loginInfo for key in ('skey', 'wxsid', 'wxuin', 'pass_ticket')]):
+        logger.error('Your wechat account may be LIMITED to log in WEB wechat, error info:\n%s' % r.text)
+        core.isLogging = False
+        return False
+    return True
 
 def web_init(self):
     url = '%s/webwxinit?r=%s' % (self.loginInfo['url'], int(time.time()))
@@ -252,6 +264,8 @@ def start_receiving(self, exitCallback=None, getReceivingFnOnly=False):
                         self.msgList.put(chatroomMsg)
                         update_local_friends(self, otherList)
                 retryCount = 0
+            except requests.exceptions.ReadTimeout:
+                pass
             except:
                 retryCount += 1
                 logger.error(traceback.format_exc())
@@ -282,7 +296,20 @@ def sync_check(self):
         'synckey'  : self.loginInfo['synckey'],
         '_'        : int(time.time() * 1000),}
     headers = { 'User-Agent' : config.USER_AGENT }
-    r = self.s.get(url, params=params, headers=headers, timeout=config.TIMEOUT)
+    try:
+        r = self.s.get(url, params=params, headers=headers, timeout=config.TIMEOUT)
+    except requests.exceptions.ConnectionError as e:
+        try:
+            if not isinstance(e.args[0].args[1], BadStatusLine):
+                raise
+            # will return a package with status '0 -'
+            # and value like:
+            # 6f:00:8a:9c:09:74:e4:d8:e0:14:bf:96:3a:56:a0:64:1b:a4:25:5d:12:f4:31:a5:30:f1:c6:48:5f:c3:75:6a:99:93
+            # seems like status of typing, but before I make further achievement code will remain like this
+            return '2'
+        except:
+            raise
+    r.raise_for_status()
     regx = r'window.synccheck={retcode:"(\d+)",selector:"(\d+)"}'
     pm = re.search(regx, r.text)
     if pm is None or pm.group(1) != '0':
