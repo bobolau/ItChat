@@ -1,7 +1,7 @@
-import os, sys, time, re, io
+import os, time, re, io
 import threading
 import json, xml.dom.minidom
-import copy, pickle, random
+import random
 import traceback, logging
 try:
     from httplib import BadStatusLine
@@ -115,11 +115,11 @@ def get_QR(self, uuid=None, enableCmdQR=False, picDir=None, qrCallback=None):
     if hasattr(qrCallback, '__call__'):
         qrCallback(uuid=uuid, status='0', qrcode=qrStorage.getvalue())
     else:
+        with open(picDir, 'wb') as f:
+            f.write(qrStorage.getvalue())
         if enableCmdQR:
             utils.print_cmd_qr(qrCode.text(1), enableCmdQR=enableCmdQR)
         else:
-            with open(picDir, 'wb') as f:
-                f.write(qrStorage.getvalue())
             utils.print_qr(picDir)
     return qrStorage
 
@@ -127,8 +127,8 @@ def check_login(self, uuid=None):
     uuid = uuid or self.uuid
     url = '%s/cgi-bin/mmwebwx-bin/login' % config.BASE_URL
     localTime = int(time.time())
-    params = 'loginicon=true&uuid=%s&tip=0&r=%s&_=%s' % (
-        uuid, localTime / 1579, localTime)
+    params = 'loginicon=true&uuid=%s&tip=1&r=%s&_=%s' % (
+        uuid, int(-localTime / 1579), localTime)
     headers = { 'User-Agent' : config.USER_AGENT }
     r = self.s.get(url, params=params, headers=headers)
     regx = r'window.code=(\d+)'
@@ -168,6 +168,7 @@ def process_login_info(core, loginContent):
     else:
         core.loginInfo['fileUrl'] = core.loginInfo['syncUrl'] = core.loginInfo['url']
     core.loginInfo['deviceid'] = 'e' + repr(random.random())[2:17]
+    core.loginInfo['logintime'] = int(time.time() * 1e3)
     core.loginInfo['BaseRequest'] = {}
     for node in xml.dom.minidom.parseString(r.text).documentElement.childNodes:
         if node.nodeName == 'skey':
@@ -185,12 +186,15 @@ def process_login_info(core, loginContent):
     return True
 
 def web_init(self):
-    url = '%s/webwxinit?r=%s' % (self.loginInfo['url'], int(time.time()))
+    url = '%s/webwxinit' % self.loginInfo['url']
+    params = {
+        'r': int(-time.time() / 1579),
+        'pass_ticket': self.loginInfo['pass_ticket'], }
     data = { 'BaseRequest': self.loginInfo['BaseRequest'], }
     headers = {
         'ContentType': 'application/json; charset=UTF-8',
         'User-Agent' : config.USER_AGENT, }
-    r = self.s.post(url, data=json.dumps(data), headers=headers)
+    r = self.s.post(url, params=params, data=json.dumps(data), headers=headers)
     dic = json.loads(r.content.decode('utf-8', 'replace'))
     # deal with login info
     utils.emoji_formatter(dic['User'], 'NickName')
@@ -203,19 +207,19 @@ def web_init(self):
     self.storageClass.userName = dic['User']['UserName']
     self.storageClass.nickName = dic['User']['NickName']
     # deal with contact list returned when init
-    contactList = dic.get('ContactList', [])		
-    chatroomList, otherList = [], []		
-    for m in contactList:		
-        if m['Sex'] != 0:		
-            otherList.append(m)		
-        elif '@@' in m['UserName']:		
+    contactList = dic.get('ContactList', [])
+    chatroomList, otherList = [], []
+    for m in contactList:
+        if m['Sex'] != 0:
+            otherList.append(m)
+        elif '@@' in m['UserName']:
             m['MemberList'] = [] # don't let dirty info pollute the list
-            chatroomList.append(m)		
-        elif '@' in m['UserName']:		
-            # mp will be dealt in update_local_friends as well		
-            otherList.append(m)		
+            chatroomList.append(m)
+        elif '@' in m['UserName']:
+            # mp will be dealt in update_local_friends as well
+            otherList.append(m)
     if chatroomList:
-        update_local_chatrooms(self, chatroomList)		
+        update_local_chatrooms(self, chatroomList)
     if otherList:
         update_local_friends(self, otherList)
     return dic
@@ -294,8 +298,9 @@ def sync_check(self):
         'uin'      : self.loginInfo['wxuin'],
         'deviceid' : self.loginInfo['deviceid'],
         'synckey'  : self.loginInfo['synckey'],
-        '_'        : int(time.time() * 1000),}
+        '_'        : self.loginInfo['logintime'], }
     headers = { 'User-Agent' : config.USER_AGENT }
+    self.loginInfo['logintime'] += 1
     try:
         r = self.s.get(url, params=params, headers=headers, timeout=config.TIMEOUT)
     except requests.exceptions.ConnectionError as e:
@@ -331,7 +336,7 @@ def get_msg(self):
     r = self.s.post(url, data=json.dumps(data), headers=headers, timeout=config.TIMEOUT)
     dic = json.loads(r.content.decode('utf-8', 'replace'))
     if dic['BaseResponse']['Ret'] != 0: return None, None
-    self.loginInfo['SyncKey'] = dic['SyncCheckKey']
+    self.loginInfo['SyncKey'] = dic['SyncKey']
     self.loginInfo['synckey'] = '|'.join(['%s_%s' % (item['Key'], item['Val'])
         for item in dic['SyncCheckKey']['List']])
     return dic['AddMsgList'], dic['ModContactList']
